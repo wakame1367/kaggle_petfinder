@@ -22,23 +22,22 @@ jobs:
       - name: build submission codes
         run: |
           python ./build.py
-      # Reference: https://github.com/harupy/push-kaggle-kernel
       - uses: harupy/push-kaggle-kernel@master
         env:
           # Do not leak your credentials.
-          # Set Github Secrets
           KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
           KAGGLE_KEY: ${{ secrets.KAGGLE_KEY }}
         with:
-          # README.md says the slug is required, but it's the id
           # https://github.com/harupy/push-kaggle-kernel/commit/266039f1ade2701a789e2c9b1e6cc360659edeff
-          id: {username}/{kernel_slug}
-          title: hoge_huga
+          # {username}/{slug}
+          id: wakamezake/petfinder-sample-pipeline
+          title: petfinder_sample_pipeline
           code_file: ./build/script.py
           language: python
           kernel_type: script
           # Do not share high-scoring kernels.
           is_private: false
-          # ex: petfinder-adoption-prediction
           competition_sources: |
-            {competition_slug}
+            petfinder-adoption-prediction
+          kernel_sources: |
+            wakamezake/extract-image-features-from-pretrained-nn

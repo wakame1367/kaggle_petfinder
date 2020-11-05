@@ -1,5 +1,3 @@
-import glob
-import json
 from collections import Counter
 from functools import partial
 from math import sqrt
@@ -9,15 +7,13 @@ import lightgbm as lgb
 import numpy as np
 import pandas as pd
 import scipy as sp
-from PIL import Image
-from joblib import Parallel, delayed
 from sklearn.decomposition import TruncatedSVD, NMF
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics import mean_squared_error
 from sklearn.model_selection import KFold
 from sklearn.model_selection import StratifiedKFold
 
-from petfinder_pipeline.utils import is_script_running
+from kaggle_petfinder.utils import is_script_running
 
 ON_KAGGLE: bool = is_script_running()
 DATA_ROOT = Path('../input/petfinder-adoption-prediction'
@@ -33,13 +29,6 @@ labels_breed = pd.read_csv(DATA_ROOT / 'breed_labels.csv')
 labels_state = pd.read_csv(DATA_ROOT / 'color_labels.csv')
 labels_color = pd.read_csv(DATA_ROOT / 'state_labels.csv')
 
-train_image_files = sorted(glob.glob(str(DATA_ROOT) + '/train_images/*.jpg'))
-train_metadata_files = sorted(glob.glob(str(DATA_ROOT) + '/train_metadata/*.json'))
-train_sentiment_files = sorted(glob.glob(str(DATA_ROOT) + '/train_sentiment/*.json'))
-test_image_files = sorted(glob.glob(str(DATA_ROOT) + '/test_images/*.jpg'))
-test_metadata_files = sorted(glob.glob(str(DATA_ROOT) + '/test_metadata/*.json'))
-test_sentiment_files = sorted(glob.glob(str(DATA_ROOT) + '/test_sentiment/*.json'))
-
 # extract datasets
 # https://www.kaggle.com/christofhenkel/extract-image-features-from-pretrained-nn
 train_img_features = pd.read_csv(
@@ -51,138 +40,6 @@ test_img_features = pd.read_csv(
 col_names = ["PetID"] + ["{}_img_feature".format(_) for _ in range(256)]
 train_img_features.columns = col_names
 test_img_features.columns = col_names
-
-
-# ref: https://www.kaggle.com/wrosinski/baselinemodeling
-class PetFinderParser(object):
-
-    def __init__(self, debug=False):
-
-        self.debug = debug
-        self.sentence_sep = ' '
-
-        # Does not have to be extracted because main DF already contains description
-        self.extract_sentiment_text = False
-
-    def open_metadata_file(self, filename):
-        """
-        Load metadata file.
-        """
-        with open(filename, 'r') as f:
-            metadata_file = json.load(f)
-        return metadata_file
-
-    def open_sentiment_file(self, filename):
-        """
-        Load sentiment file.
-        """
-        with open(filename, 'r') as f:
-            sentiment_file = json.load(f)
-        return sentiment_file
-
-    def open_image_file(self, filename):
-        """
-        Load image file.
-        """
-        image = np.asarray(Image.open(filename))
-        return image
-
-    def parse_sentiment_file(self, file):
-        """
-        Parse sentiment file. Output DF with sentiment features.
-        """
-
-        file_sentiment = file['documentSentiment']
-        file_entities = [x['name'] for x in file['entities']]
-        file_entities = self.sentence_sep.join(file_entities)
-
-        if self.extract_sentiment_text:
-            file_sentences_text = [x['text']['content'] for x in file['sentences']]
-            file_sentences_text = self.sentence_sep.join(file_sentences_text)
-        file_sentences_sentiment = [x['sentiment'] for x in file['sentences']]
-
-        file_sentences_sentiment = pd.DataFrame.from_dict(
-            file_sentences_sentiment, orient='columns').sum()
-        file_sentences_sentiment = file_sentences_sentiment.add_prefix('document_').to_dict()
-
-        file_sentiment.update(file_sentences_sentiment)
-
-        df_sentiment = pd.DataFrame.from_dict(file_sentiment, orient='index').T
-        if self.extract_sentiment_text:
-            df_sentiment['text'] = file_sentences_text
-
-        df_sentiment['entities'] = file_entities
-        df_sentiment = df_sentiment.add_prefix('sentiment_')
-
-        return df_sentiment
-
-    def parse_metadata_file(self, file):
-        """
-        Parse metadata file. Output DF with metadata features.
-        """
-
-        file_keys = list(file.keys())
-
-        if 'labelAnnotations' in file_keys:
-            file_annots = file['labelAnnotations'][:int(len(file['labelAnnotations']) * 0.3)]
-            file_top_score = np.asarray([x['score'] for x in file_annots]).mean()
-            file_top_desc = [x['description'] for x in file_annots]
-        else:
-            file_top_score = np.nan
-            file_top_desc = ['']
-
-        file_colors = file['imagePropertiesAnnotation']['dominantColors']['colors']
-        file_crops = file['cropHintsAnnotation']['cropHints']
-
-        file_color_score = np.asarray([x['score'] for x in file_colors]).mean()
-        file_color_pixelfrac = np.asarray([x['pixelFraction'] for x in file_colors]).mean()
-
-        file_crop_conf = np.asarray([x['confidence'] for x in file_crops]).mean()
-
-        if 'importanceFraction' in file_crops[0].keys():
-            file_crop_importance = np.asarray([x['importanceFraction'] for x in file_crops]).mean()
-        else:
-            file_crop_importance = np.nan
-
-        df_metadata = {
-            'annots_score': file_top_score,
-            'color_score': file_color_score,
-            'color_pixelfrac': file_color_pixelfrac,
-            'crop_conf': file_crop_conf,
-            'crop_importance': file_crop_importance,
-            'annots_top_desc': self.sentence_sep.join(file_top_desc)
-        }
-
-        df_metadata = pd.DataFrame.from_dict(df_metadata, orient='index').T
-        df_metadata = df_metadata.add_prefix('metadata_')
-
-        return df_metadata
-
-
-# Helper function for parallel data processing:
-def extract_additional_features(pet_id, mode='train'):
-    sentiment_filename = '{}_sentiment/{}.json'.format(mode,
-                                                       pet_id)
-    try:
-        sentiment_file = pet_parser.open_sentiment_file(sentiment_filename)
-        df_sentiment = pet_parser.parse_sentiment_file(sentiment_file)
-        df_sentiment['PetID'] = pet_id
-    except FileNotFoundError:
-        df_sentiment = []
-
-    dfs_metadata = []
-    metadata_filenames = sorted(glob.glob(
-        '{}_metadata/{}*.json'.format(mode, pet_id)))
-    if len(metadata_filenames) > 0:
-        for f in metadata_filenames:
-            metadata_file = pet_parser.open_metadata_file(f)
-            df_metadata = pet_parser.parse_metadata_file(metadata_file)
-            df_metadata['PetID'] = pet_id
-            dfs_metadata.append(df_metadata)
-        dfs_metadata = pd.concat(dfs_metadata, ignore_index=True, sort=False)
-    dfs = [df_sentiment, dfs_metadata]
-
-    return dfs
 
 
 def agg_features(df_metadata, df_sentiment):
@@ -475,44 +332,12 @@ def train_lightgbm(X_train, X_test, params, n_splits, num_rounds, verbose_eval, 
     return oof_train, oof_test
 
 
-pet_parser = PetFinderParser()
-
-
 def main():
     train_pet_ids = train.PetID.unique()
     test_pet_ids = test.PetID.unique()
 
-    dfs_train = Parallel(n_jobs=6, verbose=1)(
-        delayed(extract_additional_features)(i, mode='train') for i in train_pet_ids)
-
-    train_dfs_sentiment = [x[0] for x in dfs_train if isinstance(x[0], pd.DataFrame)]
-    train_dfs_metadata = [x[1] for x in dfs_train if isinstance(x[1], pd.DataFrame)]
-
-    train_dfs_sentiment = pd.concat(train_dfs_sentiment, ignore_index=True, sort=False)
-    train_dfs_metadata = pd.concat(train_dfs_metadata, ignore_index=True, sort=False)
-
-    dfs_test = Parallel(n_jobs=6, verbose=1)(
-        delayed(extract_additional_features)(i, mode='test') for i in test_pet_ids)
-
-    test_dfs_sentiment = [x[0] for x in dfs_test if isinstance(x[0], pd.DataFrame)]
-    test_dfs_metadata = [x[1] for x in dfs_test if isinstance(x[1], pd.DataFrame)]
-
-    test_dfs_sentiment = pd.concat(test_dfs_sentiment, ignore_index=True, sort=False)
-    test_dfs_metadata = pd.concat(test_dfs_metadata, ignore_index=True, sort=False)
-
-    train_sentiment_gr, train_metadata_gr, train_metadata_desc, train_sentiment_desc = agg_features(
-        train_dfs_metadata, train_dfs_sentiment)
-    test_sentiment_gr, test_metadata_gr, test_metadata_desc, test_sentiment_desc = agg_features(
-        test_dfs_metadata, test_dfs_sentiment)
-
     train_proc = train.copy()
-    for tr in [train_sentiment_gr, train_metadata_gr, train_metadata_desc, train_sentiment_desc]:
-        train_proc = train_proc.merge(tr, how='left', on='PetID')
-
     test_proc = test.copy()
-    for ts in [test_sentiment_gr, test_metadata_gr, test_metadata_desc, test_sentiment_desc]:
-        test_proc = test_proc.merge(
-            ts, how='left', on='PetID')
 
     train_proc = pd.merge(train_proc, train_img_features, on="PetID")
     test_proc = pd.merge(test_proc, test_img_features, on="PetID")
@@ -532,7 +357,7 @@ def main():
 
     X_temp = X.copy()
 
-    text_columns = ['Description', 'metadata_annots_top_desc', 'sentiment_entities']
+    text_columns = ['Description']
     categorical_columns = ['main_breed_BreedName', 'second_breed_BreedName']
 
     to_drop_columns = ['PetID', 'Name', 'RescuerID']
